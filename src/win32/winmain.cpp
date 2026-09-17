@@ -14,6 +14,7 @@
 #include <commctrl.h>
 #include <mmsystem.h>
 #include <stdio.h>
+#include <string.h>
 #include <dwmapi.h>
 #include "../res/resource.h"
 #include "../emu.h"
@@ -129,6 +130,9 @@ int screen_mode_height[MAX_FULLSCREEN];
 void enum_screen_mode();
 void set_window(HWND hWnd, int mode);
 
+// command line switches
+bool force_fullscreen_from_cmdline = false;
+
 // input
 #ifdef USE_AUTO_KEY
 void start_auto_key();
@@ -196,6 +200,60 @@ void update_socket(int ch, WPARAM wParam, LPARAM lParam)
 #endif
 
 // ----------------------------------------------------------------------------
+// command line switches
+// ----------------------------------------------------------------------------
+
+// case-insensitive, whole-token search for a "-switch" (or "/switch") style
+// argument anywhere in the raw command line string. if found, it is removed
+// from cmdline so that any remaining argument (e.g. a dropped/associated
+// file path) is left untouched for the existing drag & drop code below.
+static bool extract_command_line_switch(_TCHAR *cmdline, const _TCHAR *name)
+{
+	size_t name_len = _tcslen(name);
+	_TCHAR *p = cmdline;
+	
+	while(*p) {
+		if(_tcsnicmp(p, name, name_len) == 0) {
+			_TCHAR before = (p == cmdline) ? _T(' ') : *(p - 1);
+			_TCHAR after = *(p + name_len);
+			
+			// only match a whole token, not a substring of a longer word
+			// (e.g. a file name that happens to contain "-fullscreen")
+			if((before == _T(' ') || before == _T('\t')) &&
+			   (after == _T('\0') || after == _T(' ') || after == _T('\t'))) {
+				_TCHAR *tail = p + name_len;
+				while(*tail == _T(' ') || *tail == _T('\t')) {
+					tail++;
+				}
+				memmove(p, tail, (_tcslen(tail) + 1) * sizeof(_TCHAR));
+				return true;
+			}
+		}
+		p++;
+	}
+	return false;
+}
+
+// scan szCmdLine for switches we understand, stripping them out so the
+// remainder can still be handled by the normal (file path) command line code
+static void process_command_line_switches(_TCHAR *cmdline)
+{
+	if(extract_command_line_switch(cmdline, _T("-fullscreen")) |
+	   extract_command_line_switch(cmdline, _T("/fullscreen"))) {
+		force_fullscreen_from_cmdline = true;
+	}
+	
+	// trim any leading whitespace left behind after removing a switch
+	_TCHAR *start = cmdline;
+	while(*start == _T(' ') || *start == _T('\t')) {
+		start++;
+	}
+	if(start != cmdline) {
+		memmove(cmdline, start, (_tcslen(start) + 1) * sizeof(_TCHAR));
+	}
+}
+
+// ----------------------------------------------------------------------------
 // window main
 // ----------------------------------------------------------------------------
 
@@ -209,6 +267,10 @@ int WINAPI _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR szCmdL
 	osvi.dwOSVersionInfoSize = sizeof(OSVERSIONINFO);
 	GetVersionEx((OSVERSIONINFO*)&osvi);
 	win8_or_later = (osvi.dwPlatformId == 2 && (osvi.dwMajorVersion > 6 || (osvi.dwMajorVersion == 6 && osvi.dwMinorVersion >= 2)));
+	
+	// parse command line switches (e.g. -fullscreen) before the existing
+	// drag & drop code below tries to interpret szCmdLine as a file path
+	process_command_line_switches(szCmdLine);
 	
 	// load config
 	load_config(create_local_path(_T("%s.ini"), _T(CONFIG_NAME)));
@@ -269,7 +331,19 @@ int WINAPI _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR szCmdL
 	enum_screen_mode();
 	
 	// restore screen mode
-	if(config.window_mode >= 0 && config.window_mode < MAX_WINDOW) {
+	if(force_fullscreen_from_cmdline) {
+		// -fullscreen switch: start up in fullscreen, at the enumerated
+		// screen mode matching the current desktop resolution if there is
+		// one, otherwise just fall back to the first available mode
+		int fs_index = 0;
+		for(int i = 0; i < screen_mode_count; i++) {
+			if(screen_mode_width[i] == desktop_width && screen_mode_height[i] == desktop_height) {
+				fs_index = i;
+				break;
+			}
+		}
+		PostMessage(hWnd, WM_COMMAND, ID_SCREEN_FULLSCREEN + fs_index, 0L);
+	} else if(config.window_mode >= 0 && config.window_mode < MAX_WINDOW) {
 		PostMessage(hWnd, WM_COMMAND, ID_SCREEN_WINDOW + config.window_mode, 0L);
 	} else if(config.window_mode >= MAX_WINDOW && config.window_mode < screen_mode_count + MAX_WINDOW) {
 		PostMessage(hWnd, WM_COMMAND, ID_SCREEN_FULLSCREEN + config.window_mode - MAX_WINDOW, 0L);
